@@ -15,18 +15,17 @@
 pub mod actions;
 mod blame_entry_tooltip;
 mod blink_manager;
+mod debounced_delay;
 pub mod display_map;
 mod editor_settings;
 mod element;
-mod hunk_diff;
-mod inlay_hint_cache;
-
-mod debounced_delay;
 mod git;
 mod highlight_matching_bracket;
 mod hover_links;
 mod hover_popover;
+mod hunk_diff;
 mod indent_guides;
+mod inlay_hint_cache;
 mod inline_completion_provider;
 pub mod items;
 mod mouse_context_menu;
@@ -68,10 +67,10 @@ use gpui::{
     div, impl_actions, point, prelude::*, px, relative, size, uniform_list, Action, AnyElement,
     AppContext, AsyncWindowContext, AvailableSpace, BackgroundExecutor, Bounds, ClipboardItem,
     Context, DispatchPhase, ElementId, EventEmitter, FocusHandle, FocusableView, FontId, FontStyle,
-    FontWeight, HighlightStyle, Hsla, InteractiveText, KeyContext, Model, MouseButton, PaintQuad,
-    ParentElement, Pixels, Render, SharedString, Size, StrikethroughStyle, Styled, StyledText,
-    Subscription, Task, TextStyle, UnderlineStyle, UniformListScrollHandle, View, ViewContext,
-    ViewInputHandler, VisualContext, WeakView, WhiteSpace, WindowContext,
+    FontWeight, HighlightStyle, Hsla, InteractiveText, KeyContext, ListSizingBehavior, Model,
+    MouseButton, PaintQuad, ParentElement, Pixels, Render, SharedString, Size, StrikethroughStyle,
+    Styled, StyledText, Subscription, Task, TextStyle, UnderlineStyle, UniformListScrollHandle,
+    View, ViewContext, ViewInputHandler, VisualContext, WeakView, WhiteSpace, WindowContext,
 };
 use highlight_matching_bracket::refresh_matching_bracket_highlights;
 use hover_popover::{hide_hover, HoverState};
@@ -552,6 +551,20 @@ pub struct GutterDimensions {
     pub width: Pixels,
     pub margin: Pixels,
     pub git_blame_entries_width: Option<Pixels>,
+}
+
+impl GutterDimensions {
+    /// The full width of the space taken up by the gutter.
+    pub fn full_width(&self) -> Pixels {
+        self.margin + self.width
+    }
+
+    /// The width of the space reserved for the fold indicators,
+    /// use alongside 'justify_end' and `gutter_width` to
+    /// right align content with the line numbers
+    pub fn fold_area_width(&self) -> Pixels {
+        self.margin + self.right_padding
+    }
 }
 
 impl Default for GutterDimensions {
@@ -1113,7 +1126,8 @@ impl CompletionsMenu {
         .occlude()
         .max_h(max_height)
         .track_scroll(self.scroll_handle.clone())
-        .with_width_from_item(widest_completion_ix);
+        .with_width_from_item(widest_completion_ix)
+        .with_sizing_behavior(ListSizingBehavior::Infer);
 
         Popover::new()
             .child(list)
@@ -1460,6 +1474,7 @@ impl CodeActionsMenu {
                 })
                 .map(|(ix, _)| ix),
         )
+        .with_sizing_behavior(ListSizingBehavior::Infer)
         .into_any_element();
 
         let cursor_position = if let Some(row) = self.deployed_from_indicator {
@@ -3790,6 +3805,9 @@ impl Editor {
         let id = post_inc(&mut self.next_completion_id);
         let task = cx.spawn(|this, mut cx| {
             async move {
+                this.update(&mut cx, |this, _| {
+                    this.completion_tasks.retain(|(task_id, _)| *task_id >= id);
+                })?;
                 let completions = completions.await.log_err();
                 let menu = if let Some(completions) = completions {
                     let mut menu = CompletionsMenu {
@@ -3828,7 +3846,6 @@ impl Editor {
                             let delay_ms = EditorSettings::get_global(cx)
                                 .completion_documentation_secondary_query_debounce;
                             let delay = Duration::from_millis(delay_ms);
-
                             editor
                                 .completion_documentation_pre_resolve_debounce
                                 .fire_new(delay, cx, |editor, cx| {
@@ -3849,8 +3866,6 @@ impl Editor {
                 };
 
                 this.update(&mut cx, |this, cx| {
-                    this.completion_tasks.retain(|(task_id, _)| *task_id >= id);
-
                     let mut context_menu = this.context_menu.write();
                     match context_menu.as_ref() {
                         None => {}

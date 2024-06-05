@@ -3,6 +3,7 @@ pub mod assistant_settings;
 mod codegen;
 mod completion_provider;
 mod model_selector;
+mod prompt_library;
 mod prompts;
 mod saved_conversation;
 mod search;
@@ -11,7 +12,8 @@ mod streaming_diff;
 
 pub use assistant_panel::AssistantPanel;
 
-use assistant_settings::{AnthropicModel, AssistantSettings, OpenAiModel, ZedDotDevModel};
+use assistant_settings::{AnthropicModel, AssistantSettings, CloudModel, OpenAiModel};
+use assistant_slash_command::SlashCommandRegistry;
 use client::{proto, Client};
 use command_palette_hooks::CommandPaletteFilter;
 pub(crate) use completion_provider::*;
@@ -21,6 +23,10 @@ pub(crate) use saved_conversation::*;
 use semantic_index::{CloudEmbeddingProvider, SemanticIndex};
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
+use slash_command::{
+    active_command, default_command, fetch_command, file_command, project_command, prompt_command,
+    rustdoc_command, search_command, tabs_command,
+};
 use std::{
     fmt::{self, Display},
     sync::Arc,
@@ -80,14 +86,14 @@ impl Display for Role {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum LanguageModel {
-    ZedDotDev(ZedDotDevModel),
+    Cloud(CloudModel),
     OpenAi(OpenAiModel),
     Anthropic(AnthropicModel),
 }
 
 impl Default for LanguageModel {
     fn default() -> Self {
-        LanguageModel::ZedDotDev(ZedDotDevModel::default())
+        LanguageModel::Cloud(CloudModel::default())
     }
 }
 
@@ -96,7 +102,7 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => format!("openai/{}", model.id()),
             LanguageModel::Anthropic(model) => format!("anthropic/{}", model.id()),
-            LanguageModel::ZedDotDev(model) => format!("zed.dev/{}", model.id()),
+            LanguageModel::Cloud(model) => format!("zed.dev/{}", model.id()),
         }
     }
 
@@ -104,7 +110,7 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => model.display_name().into(),
             LanguageModel::Anthropic(model) => model.display_name().into(),
-            LanguageModel::ZedDotDev(model) => model.display_name().into(),
+            LanguageModel::Cloud(model) => model.display_name().into(),
         }
     }
 
@@ -112,7 +118,7 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => model.max_token_count(),
             LanguageModel::Anthropic(model) => model.max_token_count(),
-            LanguageModel::ZedDotDev(model) => model.max_token_count(),
+            LanguageModel::Cloud(model) => model.max_token_count(),
         }
     }
 
@@ -120,7 +126,7 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => model.id(),
             LanguageModel::Anthropic(model) => model.id(),
-            LanguageModel::ZedDotDev(model) => model.id(),
+            LanguageModel::Cloud(model) => model.id(),
         }
     }
 }
@@ -163,6 +169,20 @@ impl LanguageModelRequest {
             temperature: self.temperature,
             tool_choice: None,
             tools: Vec::new(),
+        }
+    }
+
+    /// Before we send the request to the server, we can perform fixups on it appropriate to the model.
+    pub fn preprocess(&mut self) {
+        match &self.model {
+            LanguageModel::OpenAi(_) => {}
+            LanguageModel::Anthropic(_) => {}
+            LanguageModel::Cloud(model) => match model {
+                CloudModel::Claude3Opus | CloudModel::Claude3Sonnet | CloudModel::Claude3Haiku => {
+                    preprocess_anthropic_request(self);
+                }
+                _ => {}
+            },
         }
     }
 }
@@ -251,8 +271,11 @@ pub fn init(client: Arc<Client>, cx: &mut AppContext) {
         }
     })
     .detach();
+
+    prompt_library::init(cx);
     completion_provider::init(client, cx);
     assistant_slash_command::init(cx);
+    register_slash_commands(cx);
     assistant_panel::init(cx);
 
     CommandPaletteFilter::update_global(cx, |filter, _cx| {
@@ -266,11 +289,23 @@ pub fn init(client: Arc<Client>, cx: &mut AppContext) {
     cx.observe_global::<SettingsStore>(|cx| {
         Assistant::update_global(cx, |assistant, cx| {
             let settings = AssistantSettings::get_global(cx);
-
             assistant.set_enabled(settings.enabled, cx);
         });
     })
     .detach();
+}
+
+fn register_slash_commands(cx: &mut AppContext) {
+    let slash_command_registry = SlashCommandRegistry::global(cx);
+    slash_command_registry.register_command(file_command::FileSlashCommand, true);
+    slash_command_registry.register_command(active_command::ActiveSlashCommand, true);
+    slash_command_registry.register_command(tabs_command::TabsSlashCommand, true);
+    slash_command_registry.register_command(project_command::ProjectSlashCommand, true);
+    slash_command_registry.register_command(search_command::SearchSlashCommand, true);
+    slash_command_registry.register_command(prompt_command::PromptSlashCommand, true);
+    slash_command_registry.register_command(default_command::DefaultSlashCommand, true);
+    slash_command_registry.register_command(rustdoc_command::RustdocSlashCommand, false);
+    slash_command_registry.register_command(fetch_command::FetchSlashCommand, false);
 }
 
 #[cfg(test)]
